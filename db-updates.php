@@ -4,6 +4,11 @@ use MapasCulturais\App;
 use MapasCulturais as M;
 use MapasCulturais\Entities\Registration;
 use CulturaViva\JobTypes\JobsAFormTextUpdater;
+use MapasCulturais\Entities\Agent;
+use MapasCulturais\Entities\RegistrationSpaceRelation;
+use MapasCulturais\Entities\Space;
+
+use function MapasCulturais\__exec;
 
 return [
     'migra campos @ para metadados do agente' => function () {
@@ -1104,6 +1109,7 @@ return [
     },
 
     'implementa visão no banco para trabalhar com os gráficos no metabase' => function() {
+        return false;
         $app = App::i();
         $em = $app->em;
         $conn = $em->getConnection();
@@ -1204,6 +1210,614 @@ return [
                 AND a.status > 0
         ");
 
+    },
+
+    'normalização dos metadados de estado' => function () {
+        $estados = [
+                'AC'=>'Acre',
+                'AL'=>'Alagoas',
+                'AP'=>'Amapá',
+                'AM'=>'Amazonas',
+                'BA'=>'Bahia',
+                'CE'=>'Ceará',
+                'DF'=>'Distrito Federal',
+                'ES'=>'Espírito Santo',
+                'GO'=>'Goiás',
+                'MA'=>'Maranhão',
+                'MT'=>'Mato Grosso',
+                'MS'=>'Mato Grosso do Sul',
+                'MG'=>'Minas Gerais',
+                'PA'=>'Pará',
+                'PB'=>'Paraíba',
+                'PR'=>'Paraná',
+                'PE'=>'Pernambuco',
+                'PI'=>'Piauí',
+                'RJ'=>'Rio de Janeiro',
+                'RN'=>'Rio Grande do Norte',
+                'RS'=>'Rio Grande do Sul',
+                'RO'=>'Rondônia',
+                'RR'=>'Roraima',
+                'SC'=>'Santa Catarina',
+                'SP'=>'São Paulo',
+                'SE'=>'Sergipe',
+                'TO'=>'Tocantins',
+        ];
+
+        foreach($estados as $uf => $name) {
+            echo "\nnormalizando En_Estado $name => $uf";
+            __exec("UPDATE agent_meta SET value = '{$uf}' WHERE key = 'En_Estado' AND lower(unaccent(value)) = lower(unaccent('{$name}'))");
+
+            echo "\nnormalizando En_EstadoPontaPontao $name => $uf";
+            __exec("UPDATE agent_meta SET value = '{$uf}' WHERE key = 'En_EstadoPontaPontao' AND lower(unaccent(value)) = lower(unaccent('{$name}'))");
+        }
+
+        // remove os metadados En_EstadoPontaPontao das organizações sediadas fora do Brasil.
+        __exec("DELETE FROM agent_meta WHERE key = 'En_EstadoPontaPontao' AND object_id IN (SELECT object_id FROM agent_meta WHERE key = 'paisPontaPontao' AND value = 'Brasil')");
+    },
+
+    'normalização dos metadados de país' => function () {
+        __exec("INSERT INTO agent_meta (object_id, key, value)
+                SELECT a.id, 'paisPontaPontao', am1.value 
+                FROM agent a 
+                    LEFT JOIN agent_meta am1 ON am1.object_id = a.id AND am1.key = 'pais' 
+                    LEFT JOIN agent_meta am2 ON am2.object_id = a.id AND am2.key = 'paisPontaPontao' 
+                WHERE am1.value IS NOT null AND trim(am1.value) <> '' AND am2.key is null
+            ");
+    },
+
+    'normalização da faixa das inscrições' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+        $config = include THEMES_PATH . 'CulturaViva/conf-base.php';
+        $opportunity_id = $config['rcv.opportunityId'];
+        $field = $config['rcv.fieldQuestion'];
+        $response = $config['rcv.questionResponse'];
+
+        $conn->executeQuery("
+            UPDATE registration r
+            SET range = 'Cadastro via edital'
+            FROM registration_meta rm
+            WHERE r.id = rm.object_id
+            AND r.opportunity_id = {$opportunity_id}
+            AND rm.key = '$field'
+            AND rm.value = '$response'
+            AND r.sent_timestamp >= CURRENT_DATE - INTERVAL '6 months';
+        ");
+    },
+
+    'reenfileiramento do job importRegistrations' => function() {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $query = "
+            SELECT * 
+            FROM job 
+            WHERE name = :name 
+                AND status = :status
+        ";
+
+        $jobs = $conn->fetchAllAssociative($query, [
+            'name' => 'importRegistrations',
+            'status' => 1,
+        ]);
+
+        foreach ($jobs as $job) {
+            $conn->executeQuery(
+                "UPDATE job SET status = 0 WHERE id = :id",
+                ['id' => $job['id']]
+            );
+        }
+        
         return false;
+    },
+
+    'Cria arquivos de logs para inscrições selecionadas ou inválidas da importação que não possuem' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $query = "
+            SELECT r.id
+            FROM registration r
+            WHERE r.status IN (2, 10)
+                AND opportunity_id = 5388;
+        ";
+
+        $registrations = $conn->fetchAllAssociative($query);
+
+        foreach($registrations as $registration) {
+            $registration_id = $registration['id'];
+
+            $dir_path = PUBLIC_PATH . 'files/importer/';
+            $log_path = $dir_path . $registration_id . '.log';
+            $status_file_path = $dir_path . $registration_id . '_status.json';
+            
+            if(!is_dir($dir_path)) {
+                mkdir($dir_path, 0755, true);
+            }
+    
+            if(!file_exists($log_path)) {
+                touch($log_path);
+            }
+    
+            if(!file_exists($status_file_path)) {
+                $default_data = [
+                    'status' => 0,
+                    'message' => '',
+                    'timestamp' => date('d-m-Y H:i:s')
+                ];
+
+                file_put_contents($status_file_path, json_encode($default_data, JSON_PRETTY_PRINT));
+            }
+        }
+    },
+    
+    'Popula valor do metadado rcv_last_update_timestamp com o valor da última atualização do coletivo' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $query = "
+            WITH pontos AS (
+                SELECT a.id, a.update_timestamp
+                FROM agent a
+                JOIN seal_relation sr ON sr.object_id = a.id 
+                    AND sr.object_type = 'MapasCulturais\Entities\Agent'
+                    AND sr.seal_id IN (6, 101)
+                GROUP BY a.id
+            )
+            INSERT INTO agent_meta (object_id, key, value)
+            SELECT p.id, 'rcv_last_update_timestamp', p.update_timestamp 
+            FROM pontos p
+            WHERE NOT EXISTS (
+                SELECT 1 
+                FROM agent_meta am 
+                WHERE am.object_id = p.id 
+                AND am.key = 'rcv_last_update_timestamp'
+            );
+        ";
+
+        $conn->executeQuery($query);
+    },
+
+    'Atualiza tipoPonto para formato de seleção múltipla' => function () use ($conn) {
+        $app = App::i();
+        $em = $app->em;
+        $conn = $em->getConnection();
+
+        $conn->executeStatement("
+            UPDATE agent_meta
+            SET value = jsonb_build_array(value)
+            WHERE \"key\" = 'tipoPonto'
+            AND value IS NOT NULL
+            AND TRIM(value) <> ''
+        ");
+    },
+
+    'Implementa visão para facilitar os filtros com inscrição no metabase' => function() {
+         return false;
+        $app = App::i();
+        $em = $app->em;
+        $conn = $em->getConnection();
+
+        $conn->executeQuery("
+            CREATE
+            OR REPLACE VIEW rcv_bi_registration AS
+            select
+                r.*,
+                uf.value as estado,
+                cidade.value as municipio,
+                tipoPonto.value as tipo_ponto,
+                selo_ponto.id as certificado_ponto,
+                selo_pontao.id as certificado_pontao,
+                selo_certificacao_minc.id as selo_certificacao_minc,
+                aguardando_atualizacao.id as aguardando_atualizacao
+            from
+                registration r
+                join agent_relation ar on ar.object_type = 'MapasCulturais\Entities\Registration'
+                and ar.object_id = r.id
+                and ar.type = 'coletivo'
+                left join seal_relation selo_ponto on selo_ponto.object_type = 'MapasCulturais\Entities\Agent'
+                and selo_ponto.object_id = ar.agent_id
+                and selo_ponto.seal_id = 6
+                left join seal_relation selo_pontao on selo_pontao.object_type = 'MapasCulturais\Entities\Agent'
+                and selo_pontao.object_id = ar.agent_id
+                and selo_pontao.seal_id = 101
+                left join seal_relation selo_certificacao_minc on selo_certificacao_minc.object_type = 'MapasCulturais\Entities\Agent'
+                and selo_certificacao_minc.object_id = ar.agent_id
+                and selo_certificacao_minc.seal_id = 105
+                left join seal_relation aguardando_atualizacao on aguardando_atualizacao.object_type = 'MapasCulturais\Entities\Agent'
+                and aguardando_atualizacao.object_id = ar.agent_id
+                and aguardando_atualizacao.seal_id = 117
+                left join agent_meta uf on uf.key = 'En_Estado'
+                and uf.object_id = ar.agent_id
+                left join agent_meta cidade on cidade.key = 'En_Municipio'
+                and cidade.object_id = ar.agent_id
+                left join agent_meta tipoPonto on tipoPonto.key = 'tipoPonto'
+                and tipoPonto.object_id = ar.agent_id
+            where
+                r.opportunity_id = 5386");
+    },
+
+    'Altera o tipo dos agentes proprietários de cadastros importados, de coletivo para individual' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $query = "
+            SELECT * FROM agent
+            WHERE type = 2
+                AND id IN (
+                    SELECT a.parent_id
+                    FROM agent a
+                    JOIN seal_relation sr ON sr.object_id = a.id
+                        AND sr.object_type = 'MapasCulturais\Entities\Agent'
+                        AND sr.seal_id = 105
+            );
+        ";
+
+        $agents = $conn->fetchAllAssociative($query);
+
+        foreach($agents as $agent) {
+            $conn->update('agent', ['type' => 1], ['id' => $agent['id']]);
+        }
+    },
+
+    'Substituição de inscrições importadas por inscrições feitas diretamente pelo proponente' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+        $config = include THEMES_PATH . 'CulturaViva/conf-base.php';
+
+        $query = "
+            WITH organizacoes_importadas AS (
+                SELECT
+                    r.id as id_inscricao,
+                    r.status as status_inscricao,
+                    r.create_timestamp as data_criacao,
+                    r.category,
+                    r.create_timestamp,
+                    r.agent_id as id_responsavel,
+                    col.id as id_agente,
+                    col.name as nome_coletivo,
+                    col.status as status_coletivo,
+                    col.status,
+                    s.name as Selo,
+                    sp.id as id_espaco
+                FROM
+                    registration r
+                    JOIN agent_relation ar ON ar.object_type = 'MapasCulturais\Entities\Registration'
+                        AND ar.object_id = r.id
+                    JOIN agent col ON col.id = ar.agent_id
+                    JOIN seal_relation sr ON sr.object_type = 'MapasCulturais\Entities\Agent' 
+                        AND sr.seal_id = 105
+                        AND sr.object_id = col.id
+                    LEFT JOIN seal s ON s.id = sr.seal_id
+                    LEFT JOIN space sp ON sp.agent_id = ar.agent_id
+                WHERE
+                    r.opportunity_id = 5386
+                    AND r.category = 'Ponto de Cultura (coletivo sem CNPJ)'
+                    AND col.status = 1
+                    AND r.sent_timestamp is null
+            )
+
+            SELECT
+                r.id as id_inscricao,
+                oi.id_inscricao as id_inscricao_importado,
+                r.create_timestamp as data_criacao,
+                oi.data_criacao as data_criacao_importado,
+                r.status as status_inscricao,
+                oi.status_inscricao as status_inscricao_importado,
+                owner.id as id_responsavel,
+                oi.id_responsavel as id_responsável_importado,
+                col.id as id_coletivo,
+                oi.id_agente as id_coletivo_importado,
+                col.name as nome_coletivo,
+                oi.nome_coletivo as nome_coletivo_importado,
+                col.status as status_coletivo,
+                oi.status as status_coletivo_importado,
+                nomeCompleto.value as nome_completo,
+                oi.id_espaco as id_espaco
+            FROM
+                registration r
+            JOIN agent owner on r.agent_id = owner.id
+            JOIN agent_relation ar ON ar.object_type = 'MapasCulturais\Entities\Registration'
+                AND ar.object_id = r.id
+            JOIN agent col ON col.id = ar.agent_id
+            JOIN organizacoes_importadas oi on owner.id = oi.id_responsavel
+            LEFT JOIN agent_meta nomeCompleto on nomeCompleto.object_id = col.id and nomeCompleto.key = 'nomeCompleto'
+            WHERE
+                r.opportunity_id = 5386
+                AND r.category = 'Ponto de Cultura (coletivo sem CNPJ)'
+                and r.id not in (select id_inscricao from organizacoes_importadas)
+                and owner.id in (select id_responsavel from organizacoes_importadas)
+                and col.status = 0
+        ";
+
+        $cases = $conn->fetchAllAssociative($query);
+
+        $importer_seal = $app->repo('Seal')->find($config['rcv.importerSeal']);
+        $waiting_update_seal = $app->repo('Seal')->find($config['rcv.waitingUpdateSeal']);
+
+        $app->hook('entity(Registration).agentRelationsAllowedStatus', function (&$status) {
+            $status[] = Agent::STATUS_DRAFT;
+        });
+
+        foreach ($cases as $case) {
+            if($organization = $app->repo('Agent')->find($case['id_coletivo'])) {
+                try {
+                    $conn->beginTransaction();
+
+                    $organization->status = Agent::STATUS_ENABLED;
+                    $organization->save(true);
+                    $app->log->debug("==================");
+                    $app->log->debug("Organization {$organization->id} colocado com o status de ativado");
+
+                    if($case['id_espaco']) {
+                        $conn->update('space', [
+                            'agent_id' => $organization->id
+                        ], [
+                            'id' => $case['id_espaco']
+                        ]);
+
+                        $app->log->debug("Space {$case['id_espaco']} atualizado com o id da organização {$organization->id}");
+
+                        $conn->update('space_relation', [
+                            'object_id' => $case['id_inscricao']
+                        ], [
+                            'object_id' => $case['id_inscricao_importado'],
+                            'space_id'  => $case['id_espaco']
+                        ]);
+
+                        $app->log->debug("SpaceRelation do Space {$case['id_espaco']} e Registration {$case['id_inscricao_importado']} atualizado com o id da Registration {$case['id_inscricao']}");
+                    }
+
+                    if(!$case['id_espaco'] && $organization->publicLocation) {
+                        $space = new Space;
+                        $space->name = $organization->name ?: $organization->nomeCompleto;
+                        $space->owner = $organization;
+                        $space->location = $organization->location;
+                        $space->type = 125;
+                        $space->En_CEP = $organization->En_CEP;
+                        $space->En_Nome_Logradouro = $organization->En_Nome_Logradouro;
+                        $space->En_Num = $organization->En_Num;
+                        $space->En_Bairro = $organization->En_Bairro;
+                        $space->En_Municipio = $organization->En_Municipio;
+                        $space->En_Estado = $organization->En_Estado;
+                        $space->En_Complemento = $organization->En_Complemento ?: '';
+                        $space->save(true);
+
+                        $app->log->debug("Criação do space {$space->id}");
+
+                        $registration = $app->repo('Registration')->find($case['id_inscricao']);
+
+                        $relation = new RegistrationSpaceRelation;
+                        $relation->space = $space;
+                        $relation->owner = $registration;
+                        $relation->save(true);
+
+                        $app->log->debug("Criação do SpaceRelation {$relation->id}");
+
+                        $organization->rcv_sede_spaceId = $space->id;
+                        $organization->save(true);
+                    }
+
+                    $conn->update('registration', [
+                        'status' => 10
+                    ], [
+                        'id' => $case['id_inscricao']
+                    ]);
+
+                    $app->log->debug("Atualiza a Registration para aprovado {$case['id_inscricao']}");
+
+                    // Verifica se o usuário já possui os selos de 'Certificado via edital' e 'Aguardando atualização' para aplicar
+                    $seal_relations = $organization->getSealRelations();
+        
+                    $has_importer_seal = false;
+                    $has_waiting_update_seal = false;
+        
+                    foreach($seal_relations as $seal_relation) {
+                        if($seal_relation->seal->id == $config['rcv.waitingUpdateSeal']) {
+                            $has_waiting_update_seal = true;
+                        }
+        
+                        if($seal_relation->seal->id == $config['rcv.importerSeal']) {
+                            $has_importer_seal = true;
+                        }
+                    }
+        
+                    if(!$has_waiting_update_seal && $waiting_update_seal) {
+                        $organization->createSealRelation($waiting_update_seal, agent: $organization);
+                        $app->log->debug("Adiciona selo de Aguardando atualização");
+                    }
+        
+                    if(!$has_importer_seal && $importer_seal) {
+                        $organization->createSealRelation($importer_seal, agent: $organization);
+                        $app->log->debug("Adiciona selo de Certificado via edital");
+                    }
+
+                    // Exclui a inscrição e o agente coletivo criado pela importação
+                    $conn->delete('registration', ['id' => $case['id_inscricao_importado']]);
+                    $app->log->debug("Deleta a Registration de id {$case['id_inscricao_importado']}");
+
+                    $conn->delete('agent', ['id' => $case['id_coletivo_importado']]);
+                    $app->log->debug("Deleta o Agent de id {$case['id_coletivo_importado']}");
+
+                    $conn->commit();
+                } catch(Throwable $e) {
+                    $app->log->debug("Erro ao processar dados: {$e->getMessage()}");
+                    $app->log->debug("Trace: {$e->getTraceAsString()}}");
+
+                    $conn->rollBack();
+                }
+            }
+        }
+    },
+
+    'Atualiza o owner das inscrições com o owner correto após trocas de propriedades' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $query = "
+                SELECT
+                er.user_id as id_usuario,
+                a.id as id_agente,
+                a.name as nome_agente,
+                er.object_id as id_coletivo,
+                er.create_timestamp,
+                rd.key,
+                rd.value as revision_value
+            FROM
+                entity_revision er
+                LEFT JOIN entity_revision_revision_data errd ON errd.revision_id = er.id
+                LEFT JOIN entity_revision_data rd ON rd.id = errd.revision_data_id
+                LEFT JOIN usr u on er.user_id = u.id
+                LEFT JOIN agent a on a.id = u.profile_id
+            WHERE
+                er.object_type = 'MapasCulturais\Entities\Agent' AND rd.key = 'parent'
+                AND er.object_id in (
+                    select
+                        col.agent_id
+                    from
+                        registration r 
+                    join 
+                        agent_relation col on col.object_type = 'MapasCulturais\Entities\Registration' AND col.object_id = r.id AND col.type = 'coletivo'
+                    join 
+                        seal_relation imp on imp.object_type =  'MapasCulturais\Entities\Agent' AND imp.object_id = col.agent_id and imp.seal_id = 105
+                    where
+                        r.opportunity_id = 5386 AND
+                        r.status = 10
+                )
+            ORDER BY
+                er.create_timestamp ASC;
+        ";
+
+        $revisions = $conn->fetchAllAssociative($query);
+
+        $old_agent_id = null;
+        foreach($revisions as $revision) {
+            $agent_id = $revision['id_coletivo'];
+            $current_value = json_decode($revision['revision_value'], true);
+            $current_parent_id = $current_value['id'] ?? null;
+
+            if($old_agent_id == $agent_id) {
+                $previous_parent_id = $previous_revision_value['id'] ?? null;
+
+                if ($previous_parent_id !== $current_parent_id) {
+                    $old_agent_value = $previous_parent_id;
+                    $new_agent_value = $current_parent_id;
+
+                    $new_owner = $app->repo('Agent')->find($new_agent_value);
+                    if(!$new_owner) {
+                        continue;
+                    }
+
+                    $registration = $app->repo('Registration')->findOneBy([
+                        'opportunity' => 5386,
+                        'status' => 10,
+                        'owner' => $old_agent_value
+                    ]);
+                    if(!$registration) {
+                        continue;
+                    }
+
+                    $actual_owner = $registration->owner->id;
+
+                    $registration->owner = $new_owner;
+                    $registration->agentsData = $registration->_getAgentsData();
+
+                    $app->log->debug("[Troca de propriedade] Atualiza o owner {$actual_owner} da inscrição {$registration->id} para o novo owner {$new_owner->id}");
+
+                    $registration->save(true);
+
+                    if($registration_field_config = $registration->opportunity->registrationFieldConfigurations) {
+                        foreach($registration_field_config as $field) {
+                            if($field->fieldType === 'agent-owner-field') {
+                                $field_name = "field_{$field->id}";
+                                $conn->executeQuery("DELETE FROM registration_meta WHERE key = '{$field_name}' AND object_id = {$registration->id}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            $old_agent_id = $agent_id;
+            $previous_revision_value = $current_value;
+        }
+    },
+
+    'Adiciona valor ao sent_timestamp às inscrições criadas pela importação' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $query = "
+            SELECT r.id, r.create_timestamp, r.sent_timestamp, r.status
+            FROM registration r
+            JOIN agent_relation ar 
+                ON ar.object_type = 'MapasCulturais\Entities\Registration' 
+                AND ar.object_id = r.id
+            JOIN agent col 
+                ON col.id = ar.agent_id
+            JOIN seal_relation sr 
+                ON sr.object_type = 'MapasCulturais\Entities\Agent' 
+                AND sr.seal_id = 105 
+                AND sr.object_id = col.id
+            WHERE r.sent_timestamp IS NULL 
+                AND r.status = 10 
+                AND r.opportunity_id = 5386
+        ";
+
+        $registrations = $conn->fetchAllAssociative($query);
+
+        foreach($registrations as $registration) {
+            $registration_id = $registration['id'];
+            $create_timestamp = $registration['create_timestamp'];
+
+            $conn->update('registration', [
+                'sent_timestamp' => $create_timestamp,
+            ], ['id' => $registration_id]);
+        }
+    },
+
+    'Normaliza inscrição de ID 466963538' => function () {
+        $app = App::i();
+        $em = $app->em;
+        /** @var M\Connection $conn */
+        $conn = $em->getConnection();
+
+        $registration = $app->repo('Registration')->find(466963538);
+
+        $conn->executeQuery("UPDATE registration SET agent_id = :agent_id WHERE id = :id", [
+            'agent_id' => 14621733,
+            'id' => $registration->id
+        ]);
+            
+        $agents_data_json = json_encode($registration->_getAgentsData());
+
+        $conn->executeQuery("UPDATE registration SET agents_data = :agents_data WHERE id = :id", [
+            'agents_data' => $agents_data_json,
+            'id' => $registration->id
+        ]);
+
+        if($registration_field_config = $registration->opportunity->registrationFieldConfigurations) {
+            foreach($registration_field_config as $field) {
+                if($field->fieldType === 'agent-owner-field') {
+                    $field_name = "field_{$field->id}";
+                    $conn->executeQuery("DELETE FROM registration_meta WHERE key = '{$field_name}' AND object_id = {$registration->id}");
+                }
+            }
+        }
     }
 ];

@@ -1,0 +1,39 @@
+{{{_header}}}
+<table role="presentation" class="main">
+    <tr>
+        <td class="wrapper">
+            <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+                <tr>
+                    <td>
+                        <p>Olá, <strong>{{userName}}</strong></p>
+
+                        <p>
+                            Sua inscrição de número <strong>{{registrationNumber}}</strong> no <strong>Cadastro Nacional
+                                de Pontos e Pontões de Cultura</strong>, da organização
+                            {{organizationName}}{{organizationCNPJ ? ', ' + organizationCNPJ : ''}}, como
+                            <strong>{{registrationType}}</strong>, foi <strong>indeferida</strong>.
+                        </p>
+
+                        <p>
+                            Para saber os motivos acesse sua inscrição <a href="{{registrationLink}}">clicando aqui</a>
+                        </p>
+
+                        <p>
+                            Faça as alterações necessárias e inicie um novo cadastro a partir das informações já salvas
+                            anteriormente. <a href="{{newRegistrationLink}}">Clique aqui</a>
+                        </p>
+
+                        <p>
+                            Em caso de dúvidas, entre em contato com <a
+                                href="mailto:suporte.culturaviva@cultura.gov.br">suporte.culturaviva@cultura.gov.br</a>.
+                        </p>
+
+                        <p>Até mais!</p>
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+
+</table>
+{{{_footer}}}

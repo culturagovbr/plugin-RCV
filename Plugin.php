@@ -39,13 +39,44 @@ class Plugin extends MapasCulturaisPlugin {
         ];
 
         $app->config['mailer.templates']['rcv_send_import_registration'] = [
-            'title' => i::__("Importação enviada"),
+            'title' => i::__("[Cultura Viva] Importação enviada"),
             'template' => 'rcv_send_import_registration.html'
         ];
 
         $app->config['mailer.templates']['rcv_start_import_registration'] = [
-            'title' => i::__("Importação iniciada"),
+            'title' => i::__("[Cultura Viva] Importação iniciada"),
             'template' => 'rcv_start_import_registration.html'
+        ];
+
+
+        $app->config['mailer.templates']['alteration_type'] = [
+            'title' => i::__("[Cultura Viva] Alteração de Tipo"),
+            'template' => 'alteration_type.html'
+        ];
+
+        $app->config['mailer.templates']['deactivation_tipo'] = [
+            'title' => i::__("[Cultura Viva] Desativação de organização "),
+            'template' => 'deactivation_tipo.html'
+        ];
+
+        $app->config['mailer.templates']['change_of_cnpj'] = [
+            'title' => i::__("[Cultura Viva] Alteração de CNPJ"),
+            'template' => 'change_of_cnpj.html'
+        ];
+
+        $app->config['mailer.templates']['registration_approved'] = [
+            'title' => i::__("[Cultura Viva] Certificado habilitado"),
+            'template' => 'registration_approved.html'
+        ];
+
+        $app->config['mailer.templates']['registration_denied'] = [
+            'title' => i::__("[Cultura Viva] Certificado indeferido"),
+            'template' => 'registration_denied.html'
+        ];
+
+        $app->config['mailer.templates']['registration_pnab_denied'] = [
+            'title' => i::__("[Cultura Viva] Importação indeferida"),
+            'template' => 'registration_pnab_denied.html'
         ];
 
         $app->config['mailer.templates']['rcv_send_registration_update'] = [
@@ -159,6 +190,11 @@ class Plugin extends MapasCulturaisPlugin {
     {
         $app = App::i();
         
+        $controllers = $app->getRegisteredControllers();
+        if (!isset($controllers['rcv'])) {
+            $app->registerController('rcv', 'RCV\Controllers\Rcv');
+        }
+
         if(!$app->getRegisteredJobType(JobsAFormTextUpdater::SLUG)){
             $app->registerJobType(new JobsAFormTextUpdater(JobsAFormTextUpdater::SLUG));
         }
@@ -166,6 +202,16 @@ class Plugin extends MapasCulturaisPlugin {
         $this->registerMetadata('MapasCulturais\Entities\Agent', 'rcv_registration', [
             'label' => 'Inscrição da oraganização',
             'type' => 'entity',
+        ]);
+
+        $this->registerMetadata('MapasCulturais\Entities\Registration', 'rcv_pnab_registration', [
+            'label' => 'Inscrição de importação PNAB',
+            'type' => 'entity',
+        ]);
+
+        $this->registerMetadata('MapasCulturais\Entities\Registration', 'rcv_importer_row', [
+            'label' => 'Informações da linha importada',
+            'type' => 'json',
         ]);
 
         if($app->subsite && $app->subsite->id == $this->config['rcv.subsiteId']) {
@@ -183,13 +229,14 @@ class Plugin extends MapasCulturaisPlugin {
                     ],
                     'tipoPonto' => [
                         'label' => 'Tipo de ponto',
-                        'type' => 'hidden',
-                        'readonly' => true,
-                        'options' => [
-                            'pontao' => 'Pontão de Cultura (entidade com CNPJ)',
-                            'ponto_entidade' => 'Ponto de Cultura (entidade com CNPJ)',
-                            'ponto_coletivo' => 'Ponto de Cultura (coletivo sem CNPJ)',
-                        ]
+                        'type' => 'array',
+                        'serialize' => function($value, $entity) {
+                            if($_value = $entity->tipoPonto){
+                               $value = array_unique(array_merge($value,$_value));
+                            }
+
+                            return json_encode($value);
+                        },
                     ],
 
                     'rcv_sede_spaceId' => [
@@ -4461,6 +4508,11 @@ class Plugin extends MapasCulturaisPlugin {
                     $app->registerTaxonomy($entity, $def);
                 }
             }
+
+            $this->registerMetadata('MapasCulturais\Entities\Agent', 'rcv_last_update_timestamp', [
+                'label' => 'Data da última atualização da inscrição',
+                'type' => 'datetime'
+            ]);
         }
        
     }
