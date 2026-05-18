@@ -3,7 +3,6 @@
 use MapasCulturais\App;
 use MapasCulturais as M;
 use MapasCulturais\Entities\Registration;
-use CulturaViva\JobTypes\JobsAFormTextUpdater;
 use MapasCulturais\Entities\Agent;
 use MapasCulturais\Entities\RegistrationSpaceRelation;
 use MapasCulturais\Entities\Space;
@@ -914,21 +913,6 @@ return [
                 'object_type' => 'MapasCulturais\Entities\Registration'
             ]);
         }
-    },
-
-    'Atualiza Job de acompanhamento das inscrições sinalizadas com Sim. Estou ciente de que a minha certificação dependerá da avaliação pela Comissão de Seleção do edital da Cultura Viva em que estou concorrendo' => function(){
-        $app = App::i();
-        $start_string = date('Y-m-d 00:00:00',strtotime('tomorrow'));
-        $interval_string = '+24 hours';
-        $iterations = 3650;
-
-        $job = $app->enqueueOrReplaceJob(JobsAFormTextUpdater::SLUG,[],$start_string,$interval_string,$iterations);
-        $job->save(true);
-        $job->subsite = $app->repo('Subsite')->find('8');
-
-        $app->log->debug('Deletando JobsAFormTextUpdater');
-
-        return false;
     },
 
     'define metadado rcv_registration nas organizações que ainda não possuem' => function () {
