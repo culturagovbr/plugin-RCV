@@ -9,6 +9,7 @@ use MapasCulturais\Definitions\Taxonomy;
 use CulturaViva\JobTypes\JobsAFormTextUpdater;
 use MapasCulturais\Entities\Opportunity;
 use MapasCulturais\Entities\Registration;
+use MapasCulturais\Entities\RegistrationEvaluation;
 use MapasCulturais\Plugin as MapasCulturaisPlugin;
 
 class Plugin extends MapasCulturaisPlugin {
@@ -19,6 +20,11 @@ class Plugin extends MapasCulturaisPlugin {
             'rcv.publicSpreadsheetColumns' => [
                 'cnpj', 'seals', 'updateTimestamp', 'name', 'nomeCompleto', 'emailPublico', 'telefonePublico', 'longDescription', 'comunidadesTradicional'
             ],
+
+            // Configurações necessárias para cálculo, em tempo real, da distribuição equilibrada
+            'rcv.autoQuota.enabled' => env('RCV_AUTO_QUOTA_ENABLED', true),
+            'rcv.autoQuota.opportunityId' => env('RCV_AUTO_QUOTA_OPPORTUNITY_ID', 5386),
+            'rcv.autoQuota.roundSize' => env('RCV_AUTO_QUOTA_ROUND_SIZE', 10),
         ];
 
         parent::__construct($config);
@@ -184,6 +190,84 @@ class Plugin extends MapasCulturaisPlugin {
         } else {
             $app->hook("app.register:after", $function);
         }
+
+        $this->registerDistributionQuotaMitigation($app);
+    }
+
+    /**
+     * Sem isso, a distribuição do core acaba travando quem já avaliou muito (fica sempre no fim
+     * da fila) e sobrecarregando quem entrou agora na comissão (recebe tudo de uma vez). Não mexe
+     * no algoritmo do core — só recalcula o `maxRegistrations` de cada avaliador, a cada rodada,
+     * como `avaliações já feitas + roundSize`, pra igualar o espaço restante na quota entre todos.
+     */
+    private function registerDistributionQuotaMitigation(App $app): void {
+        $self = $this;
+
+        $app->hook('job(RedistribRegs).execute:before', function () use ($app, $self) {
+            /** @var \MapasCulturais\Entities\Job $this */
+            if (!$self->config['rcv.autoQuota.enabled']) {
+                return;
+            }
+
+            $emc = $this->evaluationMethodConfiguration ?? null;
+            if (!$emc) {
+                return;
+            }
+
+            $target_opportunity_id = (int) $self->config['rcv.autoQuota.opportunityId'];
+            if (!$emc->opportunity || (int) $emc->opportunity->id !== $target_opportunity_id) {
+                return;
+            }
+
+            $round_size = max(1, (int) $self->config['rcv.autoQuota.roundSize']);
+            $ignore_started = $emc->ignoreStartedEvaluations ?: (object) [];
+
+            $conn = $app->em->getConnection();
+
+            // Mesma contagem de "avaliações já feitas" usada pelo core em
+            // EvaluationMethod::redistributeRegistrations() (contabilização por comissão,
+            // respeitando o toggle "Desconsiderar as avaliações já feitas na distribuição").
+            $rows = $conn->fetchAllAssociative("
+                SELECT v.committee, v.user_id, v.status
+                  FROM registration_evaluation v
+                  JOIN registration r ON r.id = v.registration_id
+                 WHERE r.opportunity_id = :opportunity_id
+                   AND r.status > 0
+            ", ['opportunity_id' => $emc->opportunity->id]);
+
+            $done_by_committee = [];
+            foreach ($rows as $row) {
+                if (empty($row['user_id']) || empty($row['committee'])) {
+                    continue;
+                }
+
+                $committee = $row['committee'];
+                $counts_toward_distribution = !($ignore_started->$committee ?? false)
+                    || (int) $row['status'] >= RegistrationEvaluation::STATUS_EVALUATED;
+
+                if (!$counts_toward_distribution) {
+                    continue;
+                }
+
+                $user_id = (int) $row['user_id'];
+                $done_by_committee[$committee][$user_id] = ($done_by_committee[$committee][$user_id] ?? 0) + 1;
+            }
+
+            $app->disableAccessControl();
+
+            foreach ($emc->getAgentRelationsGrouped() as $committee => $relations) {
+                foreach ($relations as $relation) {
+                    $user_id = $relation->agent->user->id;
+                    $done = $done_by_committee[$committee][$user_id] ?? 0;
+
+                    $relation->maxRegistrations = $done + $round_size;
+                    $relation->__skipRedistribution = true; // evita reenfileirar RedistribRegs a partir deste save
+                    $relation->save(true);
+                }
+            }
+
+            $app->enableAccessControl();
+        });
     }
 
     public function register()
