@@ -6,7 +6,6 @@ use MapasCulturais\API;
 use MapasCulturais\App;
 use MapasCulturais\Repositories\Agent;
 use MapasCulturais\Definitions\Taxonomy;
-use CulturaViva\JobTypes\JobsAFormTextUpdater;
 use MapasCulturais\Entities\Opportunity;
 use MapasCulturais\Entities\Registration;
 use MapasCulturais\Plugin as MapasCulturaisPlugin;
@@ -195,10 +194,6 @@ class Plugin extends MapasCulturaisPlugin {
             $app->registerController('rcv', 'RCV\Controllers\Rcv');
         }
 
-        if(!$app->getRegisteredJobType(JobsAFormTextUpdater::SLUG)){
-            $app->registerJobType(new JobsAFormTextUpdater(JobsAFormTextUpdater::SLUG));
-        }
-            
         $this->registerMetadata('MapasCulturais\Entities\Agent', 'rcv_registration', [
             'label' => 'Inscrição da oraganização',
             'type' => 'entity',
